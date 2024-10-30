@@ -1,64 +1,107 @@
 package utils
 
 import (
+	"crypto/sha1"
 	"log"
 	"sync"
 )
 
-type Cache struct {
+type Shard struct {
   sync.RWMutex
   data map[string]any
 }
 
-func NewCache() Cache {
-  return Cache{
-    data: make(map[string]any),
+type ShardMap []*Shard
+
+func NewShardMap(n int) ShardMap {
+  shards := make(ShardMap, n)
+  
+  for i := 0; i < n; i++ {
+    shards[i] = &Shard{
+      data: make(map[string]any),
+    } 
   }
+
+  return shards
 }
 
-func (c *Cache) Get(key string) (any, bool) {
-  c.RLock()
-  defer c.RUnlock()
+func (s ShardMap) getShardIndex(key string) int {
+  checksum := sha1.Sum([]byte(key))
+  hash := int(checksum[0])
 
-  d := c.data[key]
+  return hash % len(s)
+}
+
+func (s ShardMap) getShard(key string) *Shard {
+  i := s.getShardIndex(key)
+  return s[i]
+}
+
+func (s ShardMap) Get(key string) (any, bool) {
+  shard := s.getShard(key) 
+
+  shard.RLock()
+  defer shard.RUnlock()
+
+  d := shard.data[key]
   return d, d != nil
 }
 
-func (c *Cache) Set(key string, value any) {
-  c.Lock()
-  defer c.Unlock()
+func (s ShardMap) Set(key string, value any) {
+  shard := s.getShard(key)
 
-  c.data[key] = value
+  shard.Lock()
+  defer shard.Unlock()
+
+  shard.data[key] = value
 }
 
-func (c *Cache) Delete(key string) {
-  c.Lock()
-  defer c.Unlock()
-  delete(c.data, key)
+func (s ShardMap) Delete(key string) {
+  shard := s.getShard(key)
+
+  shard.Lock()
+  defer shard.Unlock()
+  delete(shard.data, key)
 }
 
-func (c *Cache) Contains(key string) bool {
-  c.RLock()
-  defer c.RUnlock()
+func (s ShardMap) Contains(key string) bool {
+  shard := s.getShard(key)
 
-  val := c.data[key]
+  shard.RLock()
+  defer shard.RUnlock()
+
+  val := shard.data[key]
   return val != nil
 }
 
-func (c *Cache) Keys() []string {
-  c.RLock()
-  defer c.RUnlock()
+func (s ShardMap) Keys() []string {
+  keys := make([]string, 0)
 
-  keys := make([]string, 0, len(c.data))
-  for k := range c.data {
-    keys = append(keys, k)
+  mutex := sync.Mutex{}
+  wg := sync.WaitGroup{}
+
+  wg.Add(len(s))
+
+  for _, shard := range s {
+    go func(s *Shard) {
+      s.RLock()
+
+      for k := range s.data {
+        mutex.Lock()
+        keys = append(keys, k)
+        mutex.Unlock()
+      }
+
+      s.RUnlock()
+      wg.Done()
+    }(shard)
   }
-
+  wg.Wait()
   return keys
 }
 
 func RunCacheExample() {
-  cache := NewCache()
+  cache := NewShardMap(3)
 
   cache.Set("a", 1)
   cache.Set("b", 2)
